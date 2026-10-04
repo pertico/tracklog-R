@@ -20,10 +20,10 @@ make_content_digest <- function(lat, lon, ele, time) {
   # Formatear la geometría y tiempo en una cadena de texto única por track
   # Se usan 5 decimales en coords (~1m de precisión) para tolerar leves variaciones de redondeo
   content_string <- paste(
-    round(lat, 3), 
-    round(lon, 3), 
-#    round(ele, 1), 
-#    as.numeric(time), 
+    # round(lat, 5), 
+    # round(lon, 5), 
+    # round(ele, 1), 
+    as.numeric(time), 
     collapse = "::"
   )
   
@@ -67,16 +67,13 @@ make_track_summary <- function (tracklog) {
 }
 
 # Cargar Parquet a data.table de forma nativa
-tracklog <- setDT(read_parquet("/workdir/data/tracklog.parquet"))
+tracklog <- setDT(read_parquet("./data/tracklog.parquet"))
 
-# Eliminar filas con time = NA
-## Opción A: Filtrado estándar (crea una copia de las filas filtradas)
-tracklog <- tracklog[!is.na(time)]
-## Opción B: Si prefieres la función na.omit específica para ciertas columnas
-##tracklog <- na.omit(tracklog, cols = "time")
+# Eliminar filas con time = NA y calcular track_uid
+tracklog <- tracklog[!is.na(time)][, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
 
 # 1. Crear la clave única por segmento/track
-tracklog[, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
+# tracklog[, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
 
 # 2. Definir la CLAVE PRIMARIA y ordenar los datos físicamente por UID + Tiempo
 #    setkeyv ordena la tabla en memoria por estas columnas
@@ -87,6 +84,9 @@ setkeyv(tracklog, c("track_uid", "time"))
 
 # Crear resumen
 summary <- make_track_summary(tracklog)
+
+# Conservar tracks únicos en summary
+# summary <- unique(summary, by = "content_digest")
 
 # Eliminar tracks duplicados de tracklog
 # Obtener los track_uid que se deben conservar (primeros únicos por digest)
@@ -99,9 +99,58 @@ setkeyv(tracklog, c("track_uid", "time"))
 # Recreamos summary
 summary <- make_track_summary(tracklog)
 
-
-# Mostrar tracks que comparten el mismo digest
+# Mostrar tracks que comparten el mismo summary_digest
+"
+  En R, la función nativa duplicated() evalúa un vector de arriba a abajo. 
+  Por defecto, la primera vez que ve un valor devuelve FALSE, y solo devuelve 
+  TRUE a partir de la segunda vez que lo encuentra.
+  Para no perder la primera ocurrencia de un track duplicado, se combinan 
+  dos evaluaciones con el operador lógico | (OR):
+  
+  duplicated(summary_digest): Escanea de inicio a fin (de la fila 1 a la N). 
+  Marca como TRUE las copias (2ª, 3ª, etc.), pero deja el registro original 
+  como FALSE.
+  
+  duplicated(summary_digest, fromLast = TRUE): Escanea de fin a inicio 
+  (de la fila N a la 1). Marca como TRUE las ocurrencias anteriores, incluyendo 
+  la que para el primer escaneo era la 'original'.
+  
+  | (OR): Al unir ambos vectores con un OR, cualquier fila que forme parte 
+  de un grupo de duplicados evaluará a TRUE. Si un summary_digest es único 
+  en toda la tabla, evaluará a FALSE en ambos lados y será descartado.
+"
 summary[duplicated(summary_digest) | duplicated(summary_digest, fromLast = TRUE), 
-        .(track_uid, start_time, end_time, points, duration_m, content_digest)][order(content_digest)]
-# Conservar tracks únicos en summary
-# summary <- unique(summary, by = "content_digest")
+     .(track_uid, start_time, end_time, points, duration_m, content_digest)][order(content_digest)]
+
+
+# Non-Equi Join de summary contra sí misma para buscar inclusiones temporales
+subtrack_ids <- summary[
+  summary, 
+  on = .(start_time <= start_time, end_time >= end_time),
+  nomatch = NULL
+][
+  # Filtrar para excluir auto-coincidencias y exigir mayor duración en el track contenedor
+  track_uid != i.track_uid & duration_m > i.duration_m,
+  unique(i.track_uid) # i.track_uid es el ID del sub-track (el track más corto)
+]
+summary[, is_subtrack := track_uid %in% subtrack_ids]
+
+# Extraer e inspeccionar todos los tracks con la misma hora de inicio exacta
+# summary[duplicated(start_time) | duplicated(start_time, fromLast = TRUE),
+#         .(track_uid, start_time, end_time, points, duration_m)][order(start_time)]
+
+# Extraer e inspeccionar todos los tracks con la misma hora de fin exacta
+# summary[duplicated(end_time) | duplicated(end_time, fromLast = TRUE),
+#         .(track_uid, start_time, end_time, points, duration_m)][order(start_time)]
+
+# summary[(duplicated(start_time) | duplicated(start_time, fromLast = TRUE)) |
+#           (duplicated(end_time) | duplicated(end_time, fromLast = TRUE)),
+#         .(track_uid, is_subtrack, start_time, end_time, points, duration_m, summary_digest)][order(start_time,-points)]
+
+# Eliminamos subtracks del tracklog
+tracklog <- tracklog[!subtrack_ids]
+setkeyv(tracklog, c("track_uid", "time"))
+summary <- make_track_summary(tracklog)
+
+# Calculamos delta time
+tracklog <- tracklog[, time_delta := time - shift(time), by = track_uid]
