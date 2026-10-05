@@ -1,6 +1,7 @@
 library(arrow)
 library(data.table)
 library(openssl)
+library(sf)
 
 # Genera un UUID MD5 determinista estilo standard (8-4-4-4-12)
 make_track_uuid <- function(source, file, name, fid) {
