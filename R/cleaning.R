@@ -152,5 +152,56 @@ tracklog <- tracklog[!subtrack_ids]
 setkeyv(tracklog, c("track_uid", "time"))
 summary <- make_track_summary(tracklog)
 
+# Eliminamos track de menos de n puntos
+valid_tracks <- summary[points > 2]$track_uid
+tracklog <- tracklog[track_uid %in% valid_tracks]
+
+
 # Calculamos delta time
-tracklog <- tracklog[, time_delta := time - shift(time), by = track_uid]
+tracklog <- tracklog[, time_delta := time - shift(time), by = track_uid][
+  , last_lat := shift(lat), by = track_uid][
+  , last_lon := shift(lon), by = track_uid]
+
+# 1. Identificamos qué filas no tienen NAs en el origen ni en el destino
+filas_con_trayecto <- tracklog[!is.na(last_lon) & !is.na(lon), which = TRUE]
+
+# 2. Inicializamos la columna de distancia en el tracklog original
+tracklog[, distancia_m := NA_real_]
+
+# 3. Si hay datos válidos, calculamos directo sin mutar la tabla original
+if (length(filas_con_trayecto) > 0) {
+  
+  p_actuales <- st_as_sf(tracklog[filas_con_trayecto], coords = c("lon", "lat"), crs = 4326)
+  p_pasados  <- st_as_sf(tracklog[filas_con_trayecto], coords = c("last_lon", "last_lat"), crs = 4326)
+  
+  # Asignamos el resultado exactamente en las filas correspondientes por referencia
+  tracklog[filas_con_trayecto, distancia_m := as.numeric(
+    st_distance(p_actuales, p_pasados, by_element = TRUE)
+  )]
+}
+
+# Ampliamos campos de summary
+summary <- tracklog[, .(
+  start_time  = min(time, na.rm = TRUE),
+  end_time    = max(time, na.rm = TRUE),
+  duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
+  points    = .N,
+  mean_distance = mean(distancia_m, na.rm = TRUE), 
+  mean_time_delta = mean(time_delta, na.rm = TRUE),
+  mean_speed = mean(distancia_m/as.numeric(time_delta), na.rm = TRUE),
+  median_distance = median(distancia_m, na.rm = TRUE), 
+  median_time_delta = median(time_delta, na.rm = TRUE),
+  median_speed = median(distancia_m/as.numeric(time_delta), na.rm = TRUE),
+  sd_distance = sd(distancia_m, na.rm = TRUE), 
+  sd_time_delta = sd(time_delta, na.rm = TRUE),
+  sd_speed = sd(distancia_m/as.numeric(time_delta), na.rm = TRUE),
+  q1_distance = quantile(distancia_m, 0.25, na.rm = TRUE), 
+  q1_time_delta = quantile(time_delta, 0.25, na.rm = TRUE),
+  q1_speed = quantile(distancia_m/as.numeric(time_delta), 0.25, na.rm = TRUE),
+  q3_distance = quantile(distancia_m, 0.75, na.rm = TRUE), 
+  q3_time_delta = quantile(time_delta, 0.75, na.rm = TRUE),
+  q3_speed = quantile(distancia_m/as.numeric(time_delta), 0.75, na.rm = TRUE),
+  max_distance = max(distancia_m, na.rm = TRUE),
+  max_speed = max(distancia_m/as.numeric(time_delta), na.rm = TRUE)
+  ), 
+  track_uid]
