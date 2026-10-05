@@ -182,10 +182,11 @@ if (length(filas_con_trayecto) > 0) {
 }
 
 # Ampliamos campos de summary
+"
 summary <- tracklog[, .(
   start_time  = min(time, na.rm = TRUE),
   end_time    = max(time, na.rm = TRUE),
-  duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
+  duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = 'mins'')), 2),
   points    = .N,
   mean_distance = mean(distancia_m, na.rm = TRUE), 
   mean_time_delta = mean(time_delta, na.rm = TRUE),
@@ -206,3 +207,24 @@ summary <- tracklog[, .(
   max_speed = max(distancia_m/as.numeric(time_delta), na.rm = TRUE)
   ), 
   track_uid]
+"
+
+# Asignamos posibles splits de tracks
+tracklog[, split := FALSE]
+tracklog[time_delta > 3600 & distancia_m > 250, split := TRUE]
+
+# Generar el nuevo track_uid recalculado in-place
+tracklog[, track_uid := {
+  # cumsum(split) crea un contador incremental (0, 0, 1, 1, 2...) que sube en cada split
+  segmento <- cumsum(split) + 1L
+  
+  # Si el track original solo tiene 1 segmento, conserva su track_uid original;
+  # si se dividió, le añade la etiqueta de segmento (ej. UUID_seg1, UUID_seg2)
+  if (max(segmento) == 1L) {
+    track_uid
+  } else {
+    paste0(track_uid, "_seg", segmento)
+  }
+}, by = .(track_uid)]
+
+summary <- make_track_summary(tracklog)
