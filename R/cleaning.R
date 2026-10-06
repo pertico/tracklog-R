@@ -39,6 +39,7 @@ make_track_summary <- function (tracklog) {
     start_time  = min(time, na.rm = TRUE),
     end_time    = max(time, na.rm = TRUE),
     duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
+    distance_m  = sum(distancia_m, na.rm = TRUE),
     points    = .N
     # d_ele <- diff(ele), # Calcular diferencias de elevación punto a punto
     # ele_min     = min(ele, na.rm = TRUE),
@@ -48,6 +49,9 @@ make_track_summary <- function (tracklog) {
     # ele_gain    = round(sum(d_ele[d_ele > 0], na.rm = TRUE), 1), # Desnivel +
     # ele_loss    = round(abs(sum(d_ele[d_ele < 0], na.rm = TRUE)), 1) # Desnivel -
   ), by = .(track_uid)]
+  
+  summary [, avg_speed_kmh  := round(distance_m / (duration_m * 60) * 3.6, 2)
+    , by = .(track_uid)]
 
   setkeyv(summary, c("track_uid"))
   # Calculo digest de resumen  
@@ -64,13 +68,47 @@ make_track_summary <- function (tracklog) {
   summary[, content_digest := tracklog[, .(
     digest = make_content_digest(lat, lon, ele, time)
   ), by = .(track_uid)]$digest]
+}
+
+calculate_deltas <- function(tracklog) {
+  # Calculamos delta time
+  tracklog <- tracklog[, time_delta := time - shift(time), by = track_uid][
+    , last_lat := shift(lat), by = track_uid][
+      , last_lon := shift(lon), by = track_uid]
+  
+  # Eliminamos puntos con delta time = 0
+  tracklog <- tracklog[is.na(time_delta) | time_delta > 0]
+  
+  # 1. Identificamos qué filas no tienen NAs en el origen ni en el destino
+  filas_con_trayecto <- tracklog[!is.na(last_lon) & !is.na(lon), which = TRUE]
+  
+  # 2. Inicializamos la columna de distancia en el tracklog original
+  tracklog[, distancia_m := NA_real_]
+  
+  # 3. Si hay datos válidos, calculamos directo sin mutar la tabla original
+  if (length(filas_con_trayecto) > 0) {
+    
+    p_actuales <- st_as_sf(tracklog[filas_con_trayecto], coords = c("lon", "lat"), crs = 4326)
+    p_pasados  <- st_as_sf(tracklog[filas_con_trayecto], coords = c("last_lon", "last_lat"), crs = 4326)
+    
+    # Asignamos el resultado exactamente en las filas correspondientes por referencia
+    tracklog[filas_con_trayecto, distancia_m := as.numeric(
+      st_distance(p_actuales, p_pasados, by_element = TRUE)
+    )]
+  }
+  
+  # Calculamos velocidad del tramo
+  tracklog[, speed_kmh := distancia_m/as.numeric(time_delta)*3.6]
   
 }
 
+
 # Cargar Parquet a data.table de forma nativa
+cat("Loading data...\n")
 tracklog <- setDT(read_parquet("./data/tracklog.parquet"))
 
 # Eliminar filas con time = NA y calcular track_uid
+cat("Cleaning data (phase 1)...\n")
 tracklog <- tracklog[!is.na(time)][, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
 
 # 1. Crear la clave única por segmento/track
@@ -84,12 +122,15 @@ setkeyv(tracklog, c("track_uid", "time"))
 # tracklog[, t_sec := as.numeric(difftime(time, min(time), units = "secs")), by = track_uid]
 
 # Crear resumen
+cat('Create track summary...\n')
+tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 
 # Conservar tracks únicos en summary
 # summary <- unique(summary, by = "content_digest")
 
 # Eliminar tracks duplicados de tracklog
+cat('Remove duplicates...\n')
 # Obtener los track_uid que se deben conservar (primeros únicos por digest)
 valid_uids <- summary[!duplicated(content_digest), track_uid]
 # Filtrar tracklog conservando únicamente los track_uid válidos
@@ -98,6 +139,8 @@ tracklog <- tracklog[track_uid %in% valid_uids]
 setkeyv(tracklog, c("track_uid", "time"))
 
 # Recreamos summary
+cat('Recreate track summary...\n')
+tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 
 # Mostrar tracks que comparten el mismo summary_digest
@@ -120,11 +163,12 @@ summary <- make_track_summary(tracklog)
   de un grupo de duplicados evaluará a TRUE. Si un summary_digest es único 
   en toda la tabla, evaluará a FALSE en ambos lados y será descartado.
 "
-summary[duplicated(summary_digest) | duplicated(summary_digest, fromLast = TRUE), 
-     .(track_uid, start_time, end_time, points, duration_m, content_digest)][order(content_digest)]
+#summary[duplicated(summary_digest) | duplicated(summary_digest, fromLast = TRUE), 
+#     .(track_uid, start_time, end_time, points, duration_m, content_digest)][order(content_digest)]
 
 
 # Non-Equi Join de summary contra sí misma para buscar inclusiones temporales
+cat('Remove subtracks...\n')
 subtrack_ids <- summary[
   summary, 
   on = .(start_time <= start_time, end_time >= end_time),
@@ -151,35 +195,17 @@ summary[, is_subtrack := track_uid %in% subtrack_ids]
 # Eliminamos subtracks del tracklog
 tracklog <- tracklog[!subtrack_ids]
 setkeyv(tracklog, c("track_uid", "time"))
+
+cat('Recreate track summary...\n')
+tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 
 # Eliminamos track de menos de n puntos
-valid_tracks <- summary[points > 2]$track_uid
-tracklog <- tracklog[track_uid %in% valid_tracks]
+# valid_tracks <- summary[points > 2]$track_uid
+# tracklog <- tracklog[track_uid %in% valid_tracks]
 
 
-# Calculamos delta time
-tracklog <- tracklog[, time_delta := time - shift(time), by = track_uid][
-  , last_lat := shift(lat), by = track_uid][
-  , last_lon := shift(lon), by = track_uid]
 
-# 1. Identificamos qué filas no tienen NAs en el origen ni en el destino
-filas_con_trayecto <- tracklog[!is.na(last_lon) & !is.na(lon), which = TRUE]
-
-# 2. Inicializamos la columna de distancia en el tracklog original
-tracklog[, distancia_m := NA_real_]
-
-# 3. Si hay datos válidos, calculamos directo sin mutar la tabla original
-if (length(filas_con_trayecto) > 0) {
-  
-  p_actuales <- st_as_sf(tracklog[filas_con_trayecto], coords = c("lon", "lat"), crs = 4326)
-  p_pasados  <- st_as_sf(tracklog[filas_con_trayecto], coords = c("last_lon", "last_lat"), crs = 4326)
-  
-  # Asignamos el resultado exactamente en las filas correspondientes por referencia
-  tracklog[filas_con_trayecto, distancia_m := as.numeric(
-    st_distance(p_actuales, p_pasados, by_element = TRUE)
-  )]
-}
 
 # Ampliamos campos de summary
 "
@@ -210,8 +236,10 @@ summary <- tracklog[, .(
 "
 
 # Asignamos posibles splits de tracks
+cat('Calculate splits...\n')
 tracklog[, split := FALSE]
-tracklog[time_delta > 3600 & distancia_m > 250, split := TRUE]
+tracklog[time_delta > 3600, split := TRUE]
+#tracklog[time_delta > 3600 & distancia_m > 250, split := TRUE]
 
 # Generar el nuevo track_uid recalculado in-place
 tracklog[, track_uid := {
@@ -227,4 +255,8 @@ tracklog[, track_uid := {
   }
 }, by = .(track_uid)]
 
+cat('Recreate track summary...\n')
+tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
+
+cat('TODO: Cleaning short tracks...')
