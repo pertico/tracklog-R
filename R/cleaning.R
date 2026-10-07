@@ -54,20 +54,6 @@ make_track_summary <- function (tracklog) {
     , by = .(track_uid)]
 
   setkeyv(summary, c("track_uid"))
-  # Calculo digest de resumen  
-  summary[, summary_digest := as.character(
-    openssl::md5(
-      paste(
-        as.numeric(start_time), 
-        as.numeric(end_time), 
-        points, 
-        sep = "::"
-      ))
-  )]
-  # Calculo digest de contenido
-  summary[, content_digest := tracklog[, .(
-    digest = make_content_digest(lat, lon, ele, time)
-  ), by = .(track_uid)]$digest]
 }
 
 calculate_deltas <- function(tracklog) {
@@ -107,9 +93,11 @@ calculate_deltas <- function(tracklog) {
 cat("Loading data...\n")
 tracklog <- setDT(read_parquet("./data/tracklog.parquet"))
 
-# Eliminar filas con time = NA y calcular track_uid
+# Eliminar filas con time = NA, calcular track_uid y eliminar geometry
 cat("Cleaning data (phase 1)...\n")
-tracklog <- tracklog[!is.na(time)][, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
+tracklog <- tracklog[!is.na(time)][
+  ,track_uid := make_track_uuid(source, source_file, track_name, track_fid)][
+    ,geometry := NULL]
 
 # 1. Crear la clave única por segmento/track
 # tracklog[, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
@@ -125,6 +113,16 @@ setkeyv(tracklog, c("track_uid", "time"))
 cat('Create track summary...\n')
 tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
+# Calculo digest de resumen y contenido
+summary[, summary_digest := as.character(
+  openssl::md5(
+    paste(
+      as.numeric(start_time), 
+      as.numeric(end_time), 
+      points, 
+      sep = "::")))][, content_digest := tracklog[, .(
+  digest = make_content_digest(lat, lon, ele, time)
+), by = .(track_uid)]$digest]
 
 # Conservar tracks únicos en summary
 # summary <- unique(summary, by = "content_digest")
@@ -259,4 +257,39 @@ cat('Recreate track summary...\n')
 tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 
+cat('Calculate track geometry...\n')
+# 1. Asegurar el orden cronológico
+setorder(tracklog, track_uid, time)
+
+# 2. Filtrar tracks que tengan al menos 2 puntos (requisito mínimo para un LINESTRING)
+valid_tracks <- tracklog[, .N, by = track_uid][N >= 2, track_uid]
+
+# 3. Construir las geometrías LINESTRING agrupando directamente por track_uid
+track_geom <- tracklog[track_uid %in% valid_tracks, .(
+  geometry = list(st_linestring(cbind(lon, lat)))
+), by = .(track_uid)]
+
+# 4. Asignar el sistema de coordenadas (CRS 4326 - WGS84) a la columna de listas
+track_geom_sf <- st_sf(
+  track_uid = track_geom$track_uid,
+  geometry  = st_sfc(track_geom$geometry, crs = 4326)
+)
+
+# 5. Unir con la tabla summary
+tracks <- merge(summary, track_geom_sf, by = "track_uid", all.x = TRUE)
+tracks <- st_as_sf(tracks)
+# Eliminamos geometrías vacías
+tracks <- tracks[!st_is_empty(tracks$geometry) & !is.na(st_geometry(tracks)), ]
+
+# Guardar tracks directamente en formato GeoParquet
+st_write(tracks, "./data/tracks.gpkg", driver = "GPKG", delete_dsn = TRUE)
+
+
+"
+R (Quick Plots): Puedes visualizar rápidamente subconjuntos o filtrar tracks 
+atípicos directamente con plot(summary_sf['duration_m']) o librerías 
+interactiva como mapview::mapview(summary_sf).
+"
+
 cat('TODO: Cleaning short tracks...')
+#invalid_tracks <- summary[duration_m == 0, track_uid]
