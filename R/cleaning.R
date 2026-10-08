@@ -137,6 +137,7 @@ tracklog <- tracklog[track_uid %in% valid_uids]
 setkeyv(tracklog, c("track_uid", "time"))
 
 # Recreamos summary
+# TODO: Eliminar del summary los tracks duplicados en lugar de recrear.
 cat('Recreate track summary...\n')
 tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
@@ -195,6 +196,7 @@ tracklog <- tracklog[!subtrack_ids]
 setkeyv(tracklog, c("track_uid", "time"))
 
 cat('Recreate track summary...\n')
+# TODO: Eliminar en lugar de recrear.
 tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 
