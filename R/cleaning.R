@@ -2,6 +2,7 @@ library(arrow)
 library(data.table)
 library(openssl)
 library(sf)
+library(logger)
 
 # Genera un UUID MD5 determinista estilo standard (8-4-4-4-12)
 make_track_uuid <- function(source, file, name, fid) {
@@ -88,29 +89,24 @@ calculate_deltas <- function(tracklog) {
   
 }
 
+log_threshold(DEBUG)
+log_info("Script starting up...")
 
 # Cargar Parquet a data.table de forma nativa
-cat("Loading data...\n")
+log_info("Loading data...")
 tracklog <- setDT(read_parquet("./data/tracklog.parquet"))
+log_debug("{ tracklog[, .N] } points loaded.")
 
 # Eliminar filas con time = NA, calcular track_uid y eliminar geometry
-cat("Cleaning data (phase 1)...\n")
+log_info("Cleaning data (phase 1)...")
 tracklog <- tracklog[!is.na(time)][
   ,track_uid := make_track_uuid(source, source_file, track_name, track_fid)][
     ,geometry := NULL]
-
-# 1. Crear la clave única por segmento/track
-# tracklog[, track_uid := make_track_uuid(source, source_file, track_name, track_fid)]
-
-# 2. Definir la CLAVE PRIMARIA y ordenar los datos físicamente por UID + Tiempo
-#    setkeyv ordena la tabla en memoria por estas columnas
 setkeyv(tracklog, c("track_uid", "time"))
-
-# 3. Crear el contador de tiempo en segundos (t_sec) dentro de cada track único
-# tracklog[, t_sec := as.numeric(difftime(time, min(time), units = "secs")), by = track_uid]
+log_debug("{ tracklog[, .N] } points remaining.")
 
 # Crear resumen
-cat('Create track summary...\n')
+log_info('Create track summary...')
 tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 # Calculo digest de resumen y contenido
@@ -128,19 +124,26 @@ summary[, summary_digest := as.character(
 # summary <- unique(summary, by = "content_digest")
 
 # Eliminar tracks duplicados de tracklog
-cat('Remove duplicates...\n')
+# TODO: Duplicados con distinto numero de puntos.
+log_info('Remove duplicates...')
 # Obtener los track_uid que se deben conservar (primeros únicos por digest)
 valid_uids <- summary[!duplicated(content_digest), track_uid]
 # Filtrar tracklog conservando únicamente los track_uid válidos
 tracklog <- tracklog[track_uid %in% valid_uids]
 # Reindexar la clave primaria en memoria
 setkeyv(tracklog, c("track_uid", "time"))
+log_debug("{ tracklog[, .N] } points remaining.")
+
+summary <- summary[track_uid %in% unique(tracklog$track_uid)]
+log_debug("{ summary[, .N] } tracks remaining.")
+
 
 # Recreamos summary
 # TODO: Eliminar del summary los tracks duplicados en lugar de recrear.
-cat('Recreate track summary...\n')
-tracklog <- calculate_deltas(tracklog)
-summary <- make_track_summary(tracklog)
+#log_info('Recreate track summary...')
+#tracklog <- calculate_deltas(tracklog)
+#summary <- make_track_summary(tracklog)
+#log_debug("{ summary[, .N] } tracks remaining.")
 
 # Mostrar tracks que comparten el mismo summary_digest
 "
@@ -167,38 +170,33 @@ summary <- make_track_summary(tracklog)
 
 
 # Non-Equi Join de summary contra sí misma para buscar inclusiones temporales
-cat('Remove subtracks...\n')
+log_info('Remove subtracks...')
 subtrack_ids <- summary[
   summary, 
   on = .(start_time <= start_time, end_time >= end_time),
   nomatch = NULL
 ][
-  # Filtrar para excluir auto-coincidencias y exigir mayor duración en el track contenedor
-  track_uid != i.track_uid & duration_m > i.duration_m,
-  unique(i.track_uid) # i.track_uid es el ID del sub-track (el track más corto)
+  # Excluir autocomparaciones
+  track_uid != i.track_uid & 
+    # Resolver empates en tiempos idénticos: si duran lo mismo, conserva uno arbitrariamente usando UID
+    #(duration_m > i.duration_m | (duration_m == i.duration_m & track_uid > i.track_uid)),
+    (duration_m == i.duration_m & track_uid > i.track_uid),
+  unique(i.track_uid) # i.track_uid es el subtrack detectado
 ]
 summary[, is_subtrack := track_uid %in% subtrack_ids]
-
-# Extraer e inspeccionar todos los tracks con la misma hora de inicio exacta
-# summary[duplicated(start_time) | duplicated(start_time, fromLast = TRUE),
-#         .(track_uid, start_time, end_time, points, duration_m)][order(start_time)]
-
-# Extraer e inspeccionar todos los tracks con la misma hora de fin exacta
-# summary[duplicated(end_time) | duplicated(end_time, fromLast = TRUE),
-#         .(track_uid, start_time, end_time, points, duration_m)][order(start_time)]
-
-# summary[(duplicated(start_time) | duplicated(start_time, fromLast = TRUE)) |
-#           (duplicated(end_time) | duplicated(end_time, fromLast = TRUE)),
-#         .(track_uid, is_subtrack, start_time, end_time, points, duration_m, summary_digest)][order(start_time,-points)]
 
 # Eliminamos subtracks del tracklog
 tracklog <- tracklog[!subtrack_ids]
 setkeyv(tracklog, c("track_uid", "time"))
+log_debug("{ tracklog[, .N] } points remaining.")
 
-cat('Recreate track summary...\n')
+summary <- summary[!(is_subtrack)]
+log_debug("{ summary[, .N] } tracks remaining.")
+
+#log_info('Recreate track summary...')
 # TODO: Eliminar en lugar de recrear.
-tracklog <- calculate_deltas(tracklog)
-summary <- make_track_summary(tracklog)
+#tracklog <- calculate_deltas(tracklog)
+#summary <- make_track_summary(tracklog)
 
 # Eliminamos track de menos de n puntos
 # valid_tracks <- summary[points > 2]$track_uid
@@ -236,7 +234,7 @@ summary <- tracklog[, .(
 "
 
 # Asignamos posibles splits de tracks
-cat('Calculate splits...\n')
+log_info('Calculate splits...')
 tracklog[, split := FALSE]
 tracklog[time_delta > 3600, split := TRUE]
 #tracklog[time_delta > 3600 & distancia_m > 250, split := TRUE]
@@ -255,11 +253,11 @@ tracklog[, track_uid := {
   }
 }, by = .(track_uid)]
 
-cat('Recreate track summary...\n')
+log_info('Recreate track summary...')
 tracklog <- calculate_deltas(tracklog)
 summary <- make_track_summary(tracklog)
 
-cat('Calculate track geometry...\n')
+log_info('Calculate track geometry...')
 # 1. Asegurar el orden cronológico
 setorder(tracklog, track_uid, time)
 
@@ -293,5 +291,5 @@ atípicos directamente con plot(summary_sf['duration_m']) o librerías
 interactiva como mapview::mapview(summary_sf).
 "
 
-cat('TODO: Cleaning short tracks...')
+log_info('TODO: Cleaning short tracks...')
 #invalid_tracks <- summary[duration_m == 0, track_uid]
