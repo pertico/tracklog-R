@@ -33,23 +33,6 @@ make_content_digest <- function(lat, lon, ele, time) {
   as.character(openssl::md5(content_string))
 }
 
-
-# Genera resumen de tracks
-make_track_summary <- function (tracklog) {
-  summary <- tracklog[, .(
-    start_time  = min(time, na.rm = TRUE),
-    end_time    = max(time, na.rm = TRUE),
-    duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
-    distance_m  = sum(distancia_m, na.rm = TRUE),
-    points    = .N
-  ), by = .(track_uid)]
-
-  summary [, avg_speed_kmh  := round(distance_m / (duration_m * 60) * 3.6, 2)
-    , by = .(track_uid)]
-
-  setkeyv(summary, c("track_uid"))
-}
-
 calculate_deltas <- function(tracklog) {
   # Calculamos delta time
   tracklog <- tracklog[, time_delta := time - shift(time), by = track_uid][
@@ -101,7 +84,16 @@ log_debug("{ tracklog[, .N] } points remaining.")
 # Crear resumen
 log_info('Create track summary...')
 tracklog <- calculate_deltas(tracklog)
-summary <- make_track_summary(tracklog)
+summary <- tracklog[, .(
+  start_time  = min(time, na.rm = TRUE),
+  end_time    = max(time, na.rm = TRUE),
+  duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
+  distance_m  = sum(distancia_m, na.rm = TRUE),
+  points    = .N
+), by = .(track_uid)]
+setkeyv(summary, c("track_uid"))
+summary [, avg_speed_kmh  := round(distance_m / (duration_m * 60) * 3.6, 2)
+         , by = .(track_uid)]
 # Calculo digest de resumen y contenido
 summary[, summary_digest := as.character(
   openssl::md5(
@@ -209,9 +201,6 @@ log_debug("{ summary[, .N] } tracks remaining.")
 # Eliminamos track de menos de n puntos
 # valid_tracks <- summary[points > 2]$track_uid
 # tracklog <- tracklog[track_uid %in% valid_tracks]
-
-
-
 
 # Ampliamos campos de summary
 summary <- tracklog[, .(
