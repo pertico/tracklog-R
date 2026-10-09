@@ -42,15 +42,8 @@ make_track_summary <- function (tracklog) {
     duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
     distance_m  = sum(distancia_m, na.rm = TRUE),
     points    = .N
-    # d_ele <- diff(ele), # Calcular diferencias de elevación punto a punto
-    # ele_min     = min(ele, na.rm = TRUE),
-    # ele_max     = max(ele, na.rm = TRUE),
-    # ele_start   = first(ele),
-    # ele_end     = last(ele),
-    # ele_gain    = round(sum(d_ele[d_ele > 0], na.rm = TRUE), 1), # Desnivel +
-    # ele_loss    = round(abs(sum(d_ele[d_ele < 0], na.rm = TRUE)), 1) # Desnivel -
   ), by = .(track_uid)]
-  
+
   summary [, avg_speed_kmh  := round(distance_m / (duration_m * 60) * 3.6, 2)
     , by = .(track_uid)]
 
@@ -119,6 +112,15 @@ summary[, summary_digest := as.character(
       sep = "::")))][, content_digest := tracklog[, .(
   digest = make_content_digest(lat, lon, ele, time)
 ), by = .(track_uid)]$digest]
+log_debug("{ summary[, .N] } tracks.")
+
+# Remove short tracks
+log_info("Remove short tracks...")
+short_tracks = summary[points == 1, track_uid]
+log_debug("{ length(short_tracks)} short tracks detected.")
+tracklog <- tracklog[track_uid %notin% short_tracks]
+log_debug("{ tracklog[, .N] } points remaining.")
+summary <- summary[track_uid %notin% short_tracks]
 log_debug("{ summary[, .N] } tracks.")
 
 # Conservar tracks únicos en summary
@@ -212,32 +214,26 @@ log_debug("{ summary[, .N] } tracks remaining.")
 
 
 # Ampliamos campos de summary
-"
 summary <- tracklog[, .(
-  start_time  = min(time, na.rm = TRUE),
-  end_time    = max(time, na.rm = TRUE),
-  duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = 'mins'')), 2),
-  points    = .N,
-  mean_distance = mean(distancia_m, na.rm = TRUE), 
+  # Métricas de tiempo
   mean_time_delta = mean(time_delta, na.rm = TRUE),
-  mean_speed = mean(distancia_m/as.numeric(time_delta), na.rm = TRUE),
-  median_distance = median(distancia_m, na.rm = TRUE), 
   median_time_delta = median(time_delta, na.rm = TRUE),
-  median_speed = median(distancia_m/as.numeric(time_delta), na.rm = TRUE),
-  sd_distance = sd(distancia_m, na.rm = TRUE), 
   sd_time_delta = sd(time_delta, na.rm = TRUE),
-  sd_speed = sd(distancia_m/as.numeric(time_delta), na.rm = TRUE),
-  q1_distance = quantile(distancia_m, 0.25, na.rm = TRUE), 
-  q1_time_delta = quantile(time_delta, 0.25, na.rm = TRUE),
-  q1_speed = quantile(distancia_m/as.numeric(time_delta), 0.25, na.rm = TRUE),
-  q3_distance = quantile(distancia_m, 0.75, na.rm = TRUE), 
-  q3_time_delta = quantile(time_delta, 0.75, na.rm = TRUE),
-  q3_speed = quantile(distancia_m/as.numeric(time_delta), 0.75, na.rm = TRUE),
+  q9_time_delta = quantile(time_delta, 0.95, na.rm = TRUE),
+  # Métricas de distacia
+  mean_distance = mean(distancia_m, na.rm = TRUE),
+  median_distance = median(distancia_m, na.rm = TRUE),
+  sd_distance = sd(distancia_m, na.rm = TRUE),
+  q95_distance = quantile(distancia_m, 0.95, na.rm = TRUE),
   max_distance = max(distancia_m, na.rm = TRUE),
+  # Métricas de velocidad
+  mean_speed = mean(distancia_m/as.numeric(time_delta), na.rm = TRUE),
+  median_speed = median(distancia_m/as.numeric(time_delta), na.rm = TRUE),
+  sd_speed = sd(distancia_m/as.numeric(time_delta), na.rm = TRUE),
+  q95_speed = quantile(distancia_m/as.numeric(time_delta), 0.95, na.rm = TRUE),
   max_speed = max(distancia_m/as.numeric(time_delta), na.rm = TRUE)
-  ), 
-  track_uid]
-"
+), track_uid]
+
 
 # Asignamos posibles splits de tracks
 log_info('Calculate splits...')
