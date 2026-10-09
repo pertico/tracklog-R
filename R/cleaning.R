@@ -119,12 +119,12 @@ summary[, summary_digest := as.character(
       sep = "::")))][, content_digest := tracklog[, .(
   digest = make_content_digest(lat, lon, ele, time)
 ), by = .(track_uid)]$digest]
+log_debug("{ summary[, .N] } tracks.")
 
 # Conservar tracks únicos en summary
 # summary <- unique(summary, by = "content_digest")
 
 # Eliminar tracks duplicados de tracklog
-# TODO: Duplicados con distinto numero de puntos.
 log_info('Remove duplicates...')
 # Obtener los track_uid que se deben conservar (primeros únicos por digest)
 valid_uids <- summary[!duplicated(content_digest), track_uid]
@@ -178,11 +178,17 @@ subtrack_ids <- summary[
 ][
   # Excluir autocomparaciones
   track_uid != i.track_uid & 
-    # Resolver empates en tiempos idénticos: si duran lo mismo, conserva uno arbitrariamente usando UID
-    #(duration_m > i.duration_m | (duration_m == i.duration_m & track_uid > i.track_uid)),
-    (duration_m == i.duration_m & track_uid > i.track_uid),
-  unique(i.track_uid) # i.track_uid es el subtrack detectado
+    (
+      # 1. El padre dura más tiempo
+      duration_m > i.duration_m | 
+        (
+          # 2. Duran lo mismo, pero el padre tiene MÁS PUNTOS (mayor resolución)
+          duration_m == i.duration_m & points > i.points
+        ) 
+    ),
+  unique(i.track_uid) # ID del track de menor resolución/subtrack
 ]
+log_debug("{ length(subtrack_ids) } subtracks detected.")
 summary[, is_subtrack := track_uid %in% subtrack_ids]
 
 # Eliminamos subtracks del tracklog
