@@ -115,7 +115,7 @@ summary[, summary_digest := as.character(
 log_debug("{ summary[, .N] } tracks.")
 
 # Remove short tracks
-log_info("Remove short tracks...")
+log_info("Remove short tracks (phase 1)...")
 short_tracks = summary[points == 1, track_uid]
 log_debug("{ length(short_tracks)} short tracks detected.")
 tracklog <- tracklog[track_uid %notin% short_tracks]
@@ -215,6 +215,12 @@ log_debug("{ summary[, .N] } tracks remaining.")
 
 # Ampliamos campos de summary
 summary <- tracklog[, .(
+  track_uid = track_uid,
+  start_time  = min(time, na.rm = TRUE),
+  end_time    = max(time, na.rm = TRUE),
+  duration_m  = round(as.numeric(difftime(max(time, na.rm = TRUE), min(time, na.rm = TRUE), units = "mins")), 2),
+  distance_m  = sum(distancia_m, na.rm = TRUE),
+  points    = .N,
   # Métricas de tiempo
   mean_time_delta = mean(time_delta, na.rm = TRUE),
   median_time_delta = median(time_delta, na.rm = TRUE),
@@ -255,9 +261,29 @@ tracklog[, track_uid := {
   }
 }, by = .(track_uid)]
 
-log_info('Recreate track summary...')
-tracklog <- calculate_deltas(tracklog)
-summary <- make_track_summary(tracklog)
+summary <- tracklog[, .(
+  track_uid  = track_uid,
+  points    = .N
+), by = .(track_uid)]
+setkeyv(summary, c("track_uid"))
+
+# Remove short tracks
+log_info("Remove short tracks (phase 2)...")
+short_tracks = summary[points == 1, track_uid]
+log_debug("{ length(short_tracks)} short tracks detected.")
+tracklog <- tracklog[track_uid %notin% short_tracks]
+log_debug("{ tracklog[, .N] } points remaining.")
+
+summary <- tracklog[, .(
+  points    = .N
+), by = .(track_uid)]
+setkeyv(summary, c("track_uid"))
+summary <- summary[track_uid %notin% short_tracks]
+log_debug("{ summary[, .N] } tracks.")
+
+# log_info('Recreate track summary...')
+# tracklog <- calculate_deltas(tracklog)
+# summary <- make_track_summary(tracklog)
 
 log_info('Calculate track geometry...')
 # 1. Asegurar el orden cronológico
@@ -293,5 +319,3 @@ atípicos directamente con plot(summary_sf['duration_m']) o librerías
 interactiva como mapview::mapview(summary_sf).
 "
 
-log_info('TODO: Cleaning short tracks...')
-#invalid_tracks <- summary[duration_m == 0, track_uid]
